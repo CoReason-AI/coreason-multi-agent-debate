@@ -1,48 +1,51 @@
-# Stage 1: Builder
-FROM python:3.14-slim AS builder
+# Build stage
+FROM node:20-alpine AS builder
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-
-# Set the working directory
+# Set working directory
 WORKDIR /app
 
-# Copy the project files
-COPY pyproject.toml .
-COPY uv.lock .
-COPY src/ ./src/
-COPY README.md .
-COPY LICENSE .
+# Copy package files
+COPY package*.json ./
 
-# Install dependencies and build the wheel
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-dev --frozen
+# Install all dependencies
+RUN npm ci
 
-# Ensure project build step is included
-RUN uv build --wheel --out-dir /wheels
+# Copy source code
+COPY . .
 
+# Build TypeScript
+RUN npm run build
 
-# Stage 2: Runtime
-FROM python:3.14-slim AS runtime
+# Production stage
+FROM node:20-alpine AS production
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# Set working directory
+WORKDIR /app
 
-# Create a non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm ci --only=production
+
+# Copy built application from builder stage
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/README.md ./README.md
+
+# Create non-root user for security (appuser)
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S appuser -u 1001 -G appgroup
+
+# Change ownership of the app directory
+RUN chown -R appuser:appgroup /app
 USER appuser
 
-# Add user's local bin to PATH
-ENV PATH="/home/appuser/app/.venv/bin:/home/appuser/.local/bin:${PATH}"
+# Expose port (though MCP typically uses stdio)
+EXPOSE 3000
 
-# Set the working directory
-WORKDIR /home/appuser/app
-COPY --from=builder --chown=appuser:appuser /app/.venv ./.venv
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "console.log('Server running')" || exit 1
 
-# Copy the wheel from the builder stage
-COPY --from=builder /wheels /wheels
-
-# Install the application wheel
-RUN uv pip install --no-cache /wheels/*.whl
-
-CMD ["python", "-m", "coreason_multi_agent_debate.main"]
+# Start the server
+CMD ["npm", "start"]
